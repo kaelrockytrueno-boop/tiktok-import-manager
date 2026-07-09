@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TikTok Colecciones · Import Manager</title>
+<style>
+  :root{
+    --bg:#0d0f14; --surface:#161823; --surface-2:#1e2130;
+    --accent:#fe2c55; --accent-2:#25f4ee;
+    --text:#f3f4f6; --text-dim:#9aa0ac; --border:#2a2d3a;
+    --ok:#3ddc84; --pending:#f5c842;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+  header{padding:24px 20px 16px; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--bg); z-index:10;}
+  h1{margin:0 0 4px; font-size:1.3rem}
+  header p{margin:0; color:var(--text-dim); font-size:.85rem}
+
+  .toolbar{display:flex; flex-wrap:wrap; gap:10px; padding:16px 20px; border-bottom:1px solid var(--border); align-items:center;}
+  .toolbar input[type=text]{flex:1; min-width:160px; background:var(--surface); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:8px; font-size:.9rem;}
+  select{background:var(--surface); color:var(--text); border:1px solid var(--border); padding:9px; border-radius:8px;}
+  button{background:var(--surface-2); color:var(--text); border:1px solid var(--border); padding:9px 14px; border-radius:8px; cursor:pointer; font-size:.85rem; font-weight:600;}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  button.ghost{background:transparent}
+  #fileInput{display:none}
+
+  .stats{display:flex; gap:16px; padding:0 20px 16px; font-size:.8rem; color:var(--text-dim); flex-wrap:wrap}
+  .stats b{color:var(--text)}
+
+  #dropzone{margin:20px; padding:40px 20px; border:2px dashed var(--border); border-radius:14px; text-align:center; color:var(--text-dim); font-size:.9rem;}
+  #dropzone.drag{border-color:var(--accent); color:var(--accent)}
+
+  #collections{padding:12px 20px 60px}
+  .collection{border:1px solid var(--border); border-radius:12px; margin-bottom:14px; overflow:hidden; background:var(--surface)}
+  .collection-header{display:flex; align-items:center; gap:12px; padding:14px 16px; cursor:pointer;}
+  .collection-header:hover{background:var(--surface-2)}
+  .collection-header .chev{transition:transform .15s; color:var(--text-dim)}
+  .collection.open .chev{transform:rotate(90deg)}
+  .collection-name{font-weight:700; flex:1}
+  .progress-pill{font-size:.72rem; padding:3px 10px; border-radius:20px; background:var(--surface-2); color:var(--text-dim)}
+  .progress-pill.complete{background:rgba(61,220,132,.15); color:var(--ok)}
+  .progress-bar{height:4px; background:var(--border); border-radius:2px; overflow:hidden; margin-top:6px}
+  .progress-bar-fill{height:100%; background:var(--ok); transition:width .2s}
+
+  .collection-body{display:none; border-top:1px solid var(--border)}
+  .collection.open .collection-body{display:block}
+
+  table{width:100%; border-collapse:collapse}
+  td{padding:9px 16px; border-bottom:1px solid var(--border); font-size:.85rem; vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  tr.done{opacity:.4}
+  tr.done td.title{text-decoration:line-through}
+  .status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+  .status-pending{background:var(--pending)}
+  .status-done{background:var(--ok)}
+  .row-actions button{padding:5px 10px; font-size:.75rem}
+  a{color:var(--accent-2)}
+  footer{padding:24px 20px 60px; text-align:center; color:var(--text-dim); font-size:.75rem}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📦 TikTok Colecciones · Import Manager</h1>
+  <p>Organiza el traslado manual de tus videos guardados, colección por colección</p>
+</header>
+
+<div class="toolbar">
+  <button class="primary" onclick="document.getElementById('fileInput').click()">Cargar JSON exportado</button>
+  <input type="file" id="fileInput" accept=".json" onchange="handleFile(event)">
+  <input type="text" id="search" placeholder="Buscar por título, colección o autor..." oninput="render()">
+  <select id="filterStatus" onchange="render()">
+    <option value="all">Todos</option>
+    <option value="pending">Pendientes</option>
+    <option value="done">Ya guardados</option>
+  </select>
+  <button onclick="openNextPending()">▶ Abrir siguiente pendiente (barra espaciadora)</button>
+  <button onclick="exportCSV()">Exportar CSV</button>
+  <button class="ghost" onclick="resetProgress()">Reiniciar progreso</button>
+</div>
+
+<div class="stats" id="stats"></div>
+<div id="dropzone">Arrastra aquí el archivo <code>tiktok-colecciones-*.json</code> generado por el userscript, o usa el botón "Cargar JSON exportado".</div>
+<div id="collections"></div>
+
+<footer>Los datos y el progreso se guardan solo en tu navegador (localStorage). Nada se envía a ningún servidor.</footer>
+
+<script>
+const STORAGE_KEY = 'tt_import_collections_v2';
+const PROGRESS_KEY = 'tt_import_progress_v2';
+const OPEN_KEY = 'tt_import_open_v2';
+
+let collections = {};  // { collectionName: [ {id,title,url,author,cover} ] }
+let progress = {};     // { "collectionName::id": true }
+let openState = {};    // { collectionName: true/false }
+
+function loadState(){
+  try{ collections = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }catch(e){ collections = {}; }
+  try{ progress = JSON.parse(localStorage.getItem(PROGRESS_KEY) || '{}'); }catch(e){ progress = {}; }
+  try{ openState = JSON.parse(localStorage.getItem(OPEN_KEY) || '{}'); }catch(e){ openState = {}; }
+}
+function saveCollections(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(collections)); }
+function saveProgress(){ localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress)); }
+function saveOpenState(){ localStorage.setItem(OPEN_KEY, JSON.stringify(openState)); }
+
+function handleFile(e){ const f = e.target.files[0]; if(f) readFile(f); }
+
+function readFile(file){
+  const reader = new FileReader();
+  reader.onload = () => {
+    try{
+      const data = JSON.parse(reader.result);
+      let incoming = {};
+      // Soporta formato agrupado nuevo { collections: {...} } y el formato plano viejo (array)
+      if (data.collections && typeof data.collections === 'object') {
+        incoming = data.collections;
+      } else if (Array.isArray(data)) {
+        data.forEach(it => {
+          const col = it.collection || 'Sin clasificar';
+          (incoming[col] = incoming[col] || []).push(it);
+        });
+      } else {
+        throw new Error('formato no reconocido');
+      }
+
+      let added = 0;
+      Object.entries(incoming).forEach(([colName, items]) => {
+        if (!collections[colName]) collections[colName] = [];
+        const existingIds = new Set(collections[colName].map(i => i.id));
+        items.forEach(it => {
+          if (it.id && !existingIds.has(it.id)) {
+            collections[colName].push(it);
+            existingIds.add(it.id);
+            added++;
+          }
+        });
+      });
+      saveCollections();
+      render();
+      alert(`Importados ${added} videos nuevos en ${Object.keys(incoming).length} colecciones.`);
+    }catch(err){
+      alert('No se pudo leer el archivo. Verifica que sea el JSON exportado por el userscript v2.');
+    }
+  };
+  reader.readAsText(file);
+}
+
+const dz = document.getElementById('dropzone');
+['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('drag'); }));
+['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('drag'); }));
+dz.addEventListener('drop', e => { if(e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); });
+
+function keyFor(col, id){ return `${col}::${id}`; }
+
+function toggleDone(col, id){
+  const k = keyFor(col, id);
+  progress[k] = !progress[k];
+  saveProgress();
+  render();
+}
+
+function markCollectionDone(col){
+  collections[col].forEach(it => { progress[keyFor(col, it.id)] = true; });
+  saveProgress();
+  render();
+}
+
+function toggleOpen(col){
+  openState[col] = !openState[col];
+  saveOpenState();
+  render();
+}
+
+function openNextPending(){
+  for(const [col, items] of Object.entries(collections)){
+    const pending = items.find(it => !progress[keyFor(col, it.id)]);
+    if(pending){
+      window.open(pending.url, '_blank');
+      progress[keyFor(col, pending.id)] = true;
+      openState[col] = true;
+      saveProgress(); saveOpenState();
+      render();
+      return;
+    }
+  }
+  alert('¡No quedan pendientes en ninguna colección! 🎉');
+}
+
+function resetProgress(){
+  if(!confirm('¿Reiniciar el progreso de todas las colecciones?')) return;
+  progress = {};
+  saveProgress();
+  render();
+}
+
+function exportCSV(){
+  const rows = [['coleccion','titulo','autor','url','estado']];
+  Object.entries(collections).forEach(([col, items]) => {
+    items.forEach(it => {
+      const done = progress[keyFor(col, it.id)] ? 'guardado' : 'pendiente';
+      rows.push([col, it.title, it.author||'', it.url, done].map(csvSafe));
+    });
+  });
+  if(rows.length === 1){ alert('No hay datos cargados.'); return; }
+  const csv = rows.map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'tiktok-colecciones-export.csv';
+  a.click();
+}
+function csvSafe(s){ return `"${String(s).replace(/"/g,'""')}"`; }
+
+function render(){
+  const dz = document.getElementById('dropzone');
+  const wrap = document.getElementById('collections');
+  const search = document.getElementById('search').value.toLowerCase();
+  const filter = document.getElementById('filterStatus').value;
+  const colNames = Object.keys(collections);
+
+  if(!colNames.length){
+    dz.style.display = 'block';
+    wrap.innerHTML = '';
+    document.getElementById('stats').innerHTML = '';
+    return;
+  }
+  dz.style.display = 'none';
+
+  let totalVideos = 0, totalDone = 0;
+
+  const html = colNames.map(col => {
+    const items = collections[col];
+    const filteredItems = items.filter(it => {
+      const isDone = !!progress[keyFor(col, it.id)];
+      const matchesSearch = !search ||
+        it.title.toLowerCase().includes(search) ||
+        col.toLowerCase().includes(search) ||
+        (it.author||'').toLowerCase().includes(search);
+      const matchesFilter = filter === 'all' || (filter === 'done' ? isDone : !isDone);
+      return matchesSearch && matchesFilter;
+    });
+    if (search && filteredItems.length === 0) return '';
+
+    const doneCount = items.filter(it => progress[keyFor(col, it.id)]).length;
+    totalVideos += items.length; totalDone += doneCount;
+    const pct = items.length ? Math.round((doneCount/items.length)*100) : 0;
+    const isOpen = !!openState[col];
+
+    const rows = filteredItems.map(it => {
+      const isDone = !!progress[keyFor(col, it.id)];
+      return `
+      <tr class="${isDone?'done':''}">
+        <td style="width:24px"><span class="status-dot ${isDone?'status-done':'status-pending'}"></span></td>
+        <td class="title">${escapeHtml(it.title)}</td>
+        <td>@${escapeHtml(it.author||'')}</td>
+        <td><a href="${it.url}" target="_blank" rel="noopener">Abrir video</a></td>
+        <td class="row-actions"><button onclick="toggleDone('${escAttr(col)}','${it.id}')">${isDone?'↺ Reabrir':'✓ Marcar'}</button></td>
+      </tr>`;
+    }).join('');
+
+    return `
+    <div class="collection ${isOpen?'open':''}">
+      <div class="collection-header" onclick="toggleOpen('${escAttr(col)}')">
+        <span class="chev">▶</span>
+        <div style="flex:1">
+          <span class="collection-name">${escapeHtml(col)}</span>
+          <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
+        </div>
+        <span class="progress-pill ${pct===100?'complete':''}">${doneCount}/${items.length}</span>
+        <button onclick="event.stopPropagation(); markCollectionDone('${escAttr(col)}')" title="Marcar toda la colección como guardada en destino">✓ Toda</button>
+      </div>
+      <div class="collection-body">
+        <table><tbody>${rows || '<tr><td colspan="5" style="color:var(--text-dim)">Sin resultados con el filtro actual</td></tr>'}</tbody></table>
+      </div>
+    </div>`;
+  }).join('');
+
+  wrap.innerHTML = html;
+
+  document.getElementById('stats').innerHTML =
+    `<span><b>${colNames.length}</b> colecciones</span>
+     <span><b>${totalVideos}</b> videos totales</span>
+     <span><b>${totalDone}</b> guardados</span>
+     <span><b>${totalVideos-totalDone}</b> pendientes</span>`;
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escAttr(s){ return String(s).replace(/'/g, "\\'"); }
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return; // no interferir con el buscador
+  if (e.code === 'Space' || e.key === 'n') { e.preventDefault(); openNextPending(); }
+});
+
+loadState();
+render();
+</script>
+</body>
+</html>
